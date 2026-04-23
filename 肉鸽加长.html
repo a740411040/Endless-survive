@@ -1,0 +1,890 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>未来裂隙：绝密档案 (Roguelike FPS)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/PointerLockControls.js"></script>
+    
+    <!-- Chosen Palette: Cyberpunk Dark Sci-Fi (Dark Slate, Cyan, Neon Pink, Amber) -->
+    <!-- Application Structure Plan: The game operates entirely within a 3D WebGL canvas. UI elements are overlaid using absolute positioning and Tailwind CSS for responsive, modern design. The structure includes a Main Menu, HUD (Health, EXP, Level, Time), a dynamic Level-Up Upgrade Modal, a Lore/Story Modal that pauses the game, and a Game Over screen. This structure allows seamless transitions between action and narrative/upgrade management. -->
+    <!-- Visualization & Content Choices: 
+         1. Procedural Textures (Goal: Immersion): Used HTML5 Canvas to generate custom sci-fi floor grids and metallic wall textures dynamically, avoiding external image dependencies while achieving realistic details.
+         2. Lore Cards (Goal: Narrative/Information): Implemented as 3D glowing cubes that, when collected, pause the game and display a frosted-glass UI modal with Tailwind styling to deliver story fragments without breaking the single-file constraint. NO SVG/Mermaid used.
+         3. Dynamic Stats (Goal: Feedback): HUD updates via vanilla JS DOM manipulation to show real-time stats.
+         4. Monster Scaling (Goal: Challenge): Enemy color, size, and stats shift dynamically based on survival time and player level to visually represent the leveling system.
+    -->
+    <!-- CONFIRMATION: NO SVG graphics used. NO Mermaid JS used. -->
+
+    <style>
+        :root {
+            --neon-cyan: #0ff;
+            --neon-pink: #f0f;
+            --dark-bg: rgba(10, 15, 26, 0.85);
+            --glass-bg: rgba(15, 23, 42, 0.7);
+            --border-glow: 0 0 10px rgba(0, 255, 255, 0.5);
+        }
+        body { margin: 0; overflow: hidden; background: #000; color: white; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; user-select: none; }
+        #game-canvas { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1; }
+        .ui-layer { position: absolute; inset: 0; z-index: 10; pointer-events: none; }
+        .interactive { pointer-events: auto; }
+        
+        .glass-panel {
+            background: var(--glass-bg);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(0, 255, 255, 0.2);
+            box-shadow: var(--border-glow);
+        }
+        
+        .crt-overlay {
+            position: absolute; top: 0; left: 0; width: 100vw; height: 100vh;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+            background-size: 100% 2px, 3px 100%;
+            z-index: 5; pointer-events: none; opacity: 0.3;
+        }
+
+        .health-bar-container { width: 300px; height: 20px; background: #333; border: 2px solid #555; position: relative; }
+        .health-bar-fill { height: 100%; background: linear-gradient(90deg, #ff0055, #ff5555); transition: width 0.2s; }
+        .exp-bar-container { width: 100%; height: 8px; background: #222; margin-top: 5px; }
+        .exp-bar-fill { height: 100%; background: var(--neon-cyan); transition: width 0.2s; box-shadow: 0 0 8px var(--neon-cyan); }
+        
+        .crosshair {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            width: 20px; height: 20px; pointer-events: none; z-index: 10;
+        }
+        .crosshair::before, .crosshair::after { content: ''; position: absolute; background: var(--neon-cyan); }
+        .crosshair::before { top: 9px; left: 0; width: 20px; height: 2px; }
+        .crosshair::after { top: 0; left: 9px; width: 2px; height: 20px; }
+
+        @keyframes pulse-glow { 0% { box-shadow: 0 0 5px #f0f; } 50% { box-shadow: 0 0 20px #f0f; } 100% { box-shadow: 0 0 5px #f0f; } }
+        .lore-glow { animation: pulse-glow 2s infinite; }
+    </style>
+</head>
+<body>
+    <div id="game-canvas"></div>
+    <div class="crt-overlay"></div>
+
+    <!-- Crosshair -->
+    <div class="crosshair" id="crosshair"></div>
+
+    <!-- HUD -->
+    <div class="ui-layer flex flex-col justify-between p-6" id="hud" style="display: none;">
+        <div class="flex justify-between items-start w-full">
+            <div class="glass-panel p-4 rounded">
+                <div class="text-xl font-bold text-cyan-400 mb-1">特工等级: <span id="ui-level" class="text-white">1</span></div>
+                <div class="health-bar-container rounded mb-2"><div class="health-bar-fill rounded" id="ui-hp-bar" style="width: 100%;"></div></div>
+                <div class="text-sm">生命值: <span id="ui-hp">100</span> / <span id="ui-max-hp">100</span></div>
+                <div class="exp-bar-container rounded"><div class="exp-bar-fill rounded" id="ui-exp-bar" style="width: 0%;"></div></div>
+                <div class="text-xs text-right text-cyan-200 mt-1">升级所需: <span id="ui-exp-need">10</span></div>
+            </div>
+            <div class="glass-panel p-4 rounded text-right">
+                <div class="text-2xl font-bold text-red-400" id="ui-time">00:00</div>
+                <div class="text-sm text-gray-300">存活时间</div>
+                <div class="text-md text-yellow-300 mt-2">已收集档案: <span id="ui-lore-count">0</span>/5</div>
+            </div>
+        </div>
+        <div class="w-full text-center">
+            <div class="glass-panel inline-block px-6 py-2 rounded text-cyan-300 font-bold tracking-widest text-sm" id="weapon-info">
+                光束步枪 | 射速: <span id="ui-firerate">基础</span> | 伤害: <span id="ui-damage">10</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Menu -->
+    <div class="ui-layer flex items-center justify-center interactive" id="menu-screen">
+        <div class="glass-panel p-10 rounded-xl max-w-lg text-center">
+            <h1 class="text-5xl font-black mb-2 text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-blue-600" style="text-shadow: 0 0 20px rgba(0,255,255,0.3);">未来裂隙</h1>
+            <h2 class="text-xl text-gray-300 mb-6 tracking-widest border-b border-gray-600 pb-4">绝密档案录入</h2>
+            <div class="text-left text-sm text-gray-400 mb-8 space-y-2">
+                <p>2084年，维度裂隙实验失控，未知生物入侵实验室核心。</p>
+                <p>作为最后的清理者，你需要活下去，并寻找怪物掉落的<span class="text-pink-400 font-bold">【机密档案】</span>，揭开这一切的真相。</p>
+                <p class="mt-4 text-cyan-300 font-bold">操作说明：</p>
+                <p>WASD 移动 | 鼠标控制视角 | 左键射击 | 靠近发光方块收集</p>
+            </div>
+            <button id="btn-start" class="w-full py-4 bg-cyan-600 hover:bg-cyan-500 text-white font-bold rounded text-xl transition-all shadow-[0_0_15px_rgba(0,255,255,0.5)]">初始化系统 (点击开始)</button>
+        </div>
+    </div>
+
+    <!-- Upgrade Screen -->
+    <div class="ui-layer flex items-center justify-center interactive" id="upgrade-screen" style="display: none; background: rgba(0,0,0,0.8);">
+        <div class="text-center w-full max-w-4xl px-4">
+            <h2 class="text-4xl font-bold text-yellow-400 mb-8 animate-pulse" style="text-shadow: 0 0 10px #fbbf24;">特工升级就绪</h2>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6" id="upgrade-cards">
+                <!-- Cards injected by JS -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Lore Screen -->
+    <div class="ui-layer flex items-center justify-center interactive" id="lore-screen" style="display: none; background: rgba(0,0,0,0.85);">
+        <div class="glass-panel p-8 rounded-xl max-w-2xl text-left border-l-4 border-pink-500 lore-glow">
+            <h3 class="text-2xl font-bold text-pink-400 mb-2 font-mono">=== 档案解密完成 ===</h3>
+            <div class="text-xs text-gray-400 mb-6 font-mono">DECRYPTION KEY: VALID // CLASSIFIED INFORMATION</div>
+            <p id="lore-text" class="text-lg text-gray-200 leading-relaxed mb-8 font-serif italic"></p>
+            <button id="btn-close-lore" class="px-6 py-2 bg-pink-600 hover:bg-pink-500 text-white font-bold rounded transition-all w-full">确认录入 (继续游戏)</button>
+        </div>
+    </div>
+
+    <!-- Game Over Screen -->
+    <div class="ui-layer flex items-center justify-center interactive" id="game-over-screen" style="display: none; background: rgba(20,0,0,0.9);">
+        <div class="glass-panel p-10 rounded-xl text-center border-red-500 border-2">
+            <h1 class="text-6xl font-black text-red-500 mb-4">生命体征消失</h1>
+            <p class="text-xl text-gray-300 mb-2">存活时间: <span id="end-time" class="text-white"></span></p>
+            <p class="text-xl text-gray-300 mb-8">收集档案: <span id="end-lore" class="text-pink-400 font-bold"></span></p>
+            <button id="btn-restart" class="w-full py-4 bg-red-700 hover:bg-red-600 text-white font-bold rounded text-xl transition-all">重启时间线</button>
+        </div>
+    </div>
+
+    <script>
+        // --- 故事文本数据 (Lore System) ---
+        const LORE_DATA = [
+            "档案 #01：空间裂隙引擎初次测试成功。我们以为打开了通往新能源的大门，但从裂隙中渗出的暗物质正在改变周围的物理法则。",
+            "档案 #09：D区研究员开始出现集体幻觉。他们声称听到了来自虚空的呼唤。安保部门已介入，但隔离门似乎无法阻挡那种'声音'。",
+            "档案 #22：全面突破。那些从裂隙中爬出来的怪物...生物学分析结果令人毛骨悚然。它们的基因序列与人类有着99%的相似度。它们...是我们？",
+            "档案 #45：Omega协议已启动。高层下令摧毁地下三层的主核心。我是最后一名武装干员了，它们在进化，变得越来越聪明，甚至能适应武器伤害。",
+            "最终报告：裂隙已经无法闭合。时间线正在坍缩。这不是外星入侵，这是未来的我们试图吞噬现在的自己。不要相信任何人，活下去。"
+        ];
+
+        // --- 核心游戏变量 ---
+        let scene, camera, renderer, controls;
+        let gameState = 'MENU'; // MENU, PLAYING, UPGRADE, LORE, GAMEOVER
+        let lastTime = performance.now();
+        let gameTimer = 0;
+        let animationFrameId;
+
+        // 玩家属性
+        const player = {
+            hp: 100, maxHp: 100,
+            level: 1, exp: 0, expNeeded: 10,
+            speed: 15,
+            fireRate: 0.3, // 秒
+            lastFireTime: 0,
+            damage: 25,
+            bulletSpeed: 50,
+            penetration: 1, // 穿透怪物数量
+            collectedLore: []
+        };
+
+        // 实体与物理容器
+        const colliders = []; // 用于墙体碰撞检测 (AABB)
+        const monsters = [];
+        const bullets = [];
+        const drops = []; // 包含经验球和剧情卡片
+
+        const ARENA_SIZE = 120;
+        const HALF_ARENA = ARENA_SIZE / 2;
+
+        // --- DOM 元素 ---
+        const uiElements = {
+            menu: document.getElementById('menu-screen'),
+            hud: document.getElementById('hud'),
+            upgrade: document.getElementById('upgrade-screen'),
+            lore: document.getElementById('lore-screen'),
+            gameOver: document.getElementById('game-over-screen'),
+            crosshair: document.getElementById('crosshair'),
+            level: document.getElementById('ui-level'),
+            hpBar: document.getElementById('ui-hp-bar'),
+            hpText: document.getElementById('ui-hp'),
+            maxHpText: document.getElementById('ui-max-hp'),
+            expBar: document.getElementById('ui-exp-bar'),
+            expNeedText: document.getElementById('ui-exp-need'),
+            time: document.getElementById('ui-time'),
+            loreCount: document.getElementById('ui-lore-count'),
+            loreText: document.getElementById('lore-text'),
+            weaponDmg: document.getElementById('ui-damage'),
+            weaponFr: document.getElementById('ui-firerate')
+        };
+
+        // --- 程序化贴图生成 (Procedural Textures) ---
+        // 解决贴图细节要求，不依赖外部图片
+        function createFloorTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 512; canvas.height = 512;
+            const ctx = canvas.getContext('2d');
+            
+            // 底色
+            ctx.fillStyle = '#0a0f14';
+            ctx.fillRect(0, 0, 512, 512);
+            
+            // 噪点 (模拟水泥/污垢细节)
+            for(let i=0; i<10000; i++) {
+                ctx.fillStyle = `rgba(255,255,255,${Math.random() * 0.05})`;
+                ctx.fillRect(Math.random() * 512, Math.random() * 512, 2, 2);
+            }
+
+            // 科幻网格
+            ctx.strokeStyle = '#1e3a5f';
+            ctx.lineWidth = 4;
+            // 主网格
+            ctx.strokeRect(0, 0, 512, 512);
+            
+            // 次级网格与发光线
+            ctx.strokeStyle = 'rgba(0, 255, 255, 0.3)';
+            ctx.lineWidth = 1;
+            for(let i=1; i<8; i++) {
+                let pos = (512 / 8) * i;
+                ctx.beginPath(); ctx.moveTo(pos, 0); ctx.lineTo(pos, 512); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(0, pos); ctx.lineTo(512, pos); ctx.stroke();
+            }
+            
+            // 细节标记
+            ctx.fillStyle = 'rgba(0, 255, 255, 0.5)';
+            ctx.fillRect(10, 10, 20, 20);
+            ctx.fillRect(482, 482, 20, 20);
+
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.wrapS = THREE.RepeatWrapping;
+            texture.wrapT = THREE.RepeatWrapping;
+            texture.repeat.set(ARENA_SIZE / 10, ARENA_SIZE / 10);
+            return texture;
+        }
+
+        function createWallTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 256; canvas.height = 256;
+            const ctx = canvas.getContext('2d');
+            
+            // 金属底色渐变
+            let grad = ctx.createLinearGradient(0,0,0,256);
+            grad.addColorStop(0, '#1c222e');
+            grad.addColorStop(1, '#0e121a');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, 256, 256);
+
+            // 质感噪点
+            for(let i=0; i<5000; i++) {
+                ctx.fillStyle = `rgba(0,0,0,${Math.random() * 0.2})`;
+                ctx.fillRect(Math.random() * 256, Math.random() * 256, 3, 3);
+            }
+
+            // 面板接缝边缘
+            ctx.strokeStyle = '#05070a';
+            ctx.lineWidth = 8;
+            ctx.strokeRect(4, 4, 248, 248);
+            
+            // 高光边缘 (立体感)
+            ctx.strokeStyle = '#3a4a63';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(8, 8, 240, 240);
+
+            // 警示条纹或细节
+            ctx.fillStyle = 'rgba(255, 85, 85, 0.1)';
+            ctx.fillRect(20, 120, 216, 16);
+
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.wrapS = THREE.RepeatWrapping;
+            texture.wrapT = THREE.RepeatWrapping;
+            texture.repeat.set(ARENA_SIZE / 20, 1);
+            return texture;
+        }
+
+        // --- 初始化 Three.js ---
+        function init() {
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x02040a, 0.015); // 暗黑科幻雾效
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setClearColor(0x02040a);
+            document.getElementById('game-canvas').appendChild(renderer.domElement);
+
+            // 光照
+            const ambientLight = new THREE.AmbientLight(0x223344, 0.6);
+            scene.add(ambientLight);
+            
+            const playerLight = new THREE.PointLight(0x00ffff, 1.5, 30);
+            scene.add(playerLight);
+
+            // 控制器
+            controls = new THREE.PointerLockControls(camera, renderer.domElement);
+            // 绑定到玩家位置
+            camera.position.set(0, 2, 0);
+
+            // 构建环境
+            buildEnvironment();
+
+            // 事件监听
+            window.addEventListener('resize', onWindowResize);
+            document.addEventListener('click', onMouseClick);
+            document.addEventListener('keydown', onKeyDown);
+            document.addEventListener('keyup', onKeyUp);
+            
+            // PointerLock 状态监听
+            controls.addEventListener('lock', () => {
+                if(gameState === 'MENU' || gameState === 'LORE' || gameState === 'UPGRADE') {
+                    gameState = 'PLAYING';
+                    uiElements.menu.style.display = 'none';
+                    uiElements.hud.style.display = 'flex';
+                    uiElements.crosshair.style.display = 'block';
+                    lastTime = performance.now();
+                }
+            });
+            controls.addEventListener('unlock', () => {
+                if(gameState === 'PLAYING') {
+                    gameState = 'MENU';
+                    uiElements.menu.style.display = 'flex';
+                    uiElements.hud.style.display = 'none';
+                    uiElements.crosshair.style.display = 'none';
+                    document.getElementById('btn-start').innerText = "恢复运行 (点击继续)";
+                }
+            });
+
+            // UI 按钮绑定
+            document.getElementById('btn-start').addEventListener('click', () => {
+                if(player.hp <= 0) restartGame();
+                else controls.lock();
+            });
+            document.getElementById('btn-close-lore').addEventListener('click', () => {
+                uiElements.lore.style.display = 'none';
+                controls.lock(); // 会触发 lock 事件恢复 PLAYING 状态
+            });
+            document.getElementById('btn-restart').addEventListener('click', () => {
+                restartGame();
+            });
+
+            animate();
+        }
+
+        function buildEnvironment() {
+            const floorGeo = new THREE.PlaneGeometry(ARENA_SIZE, ARENA_SIZE);
+            const floorMat = new THREE.MeshStandardMaterial({ 
+                map: createFloorTexture(), 
+                roughness: 0.8, metalness: 0.2 
+            });
+            const floor = new THREE.Mesh(floorGeo, floorMat);
+            floor.rotation.x = -Math.PI / 2;
+            scene.add(floor);
+
+            const wallGeo = new THREE.BoxGeometry(ARENA_SIZE, 20, 2);
+            const wallMat = new THREE.MeshStandardMaterial({ 
+                map: createWallTexture(),
+                roughness: 0.6, metalness: 0.5 
+            });
+
+            // 围墙生成
+            const walls = [
+                { pos: [0, 10, -HALF_ARENA], rot: [0, 0, 0], scale: [1, 1, 1] },
+                { pos: [0, 10, HALF_ARENA], rot: [0, 0, 0], scale: [1, 1, 1] },
+                { pos: [-HALF_ARENA, 10, 0], rot: [0, Math.PI / 2, 0], scale: [1, 1, 1] },
+                { pos: [HALF_ARENA, 10, 0], rot: [0, Math.PI / 2, 0], scale: [1, 1, 1] }
+            ];
+
+            walls.forEach(w => {
+                const wall = new THREE.Mesh(wallGeo, wallMat);
+                wall.position.set(...w.pos);
+                wall.rotation.set(...w.rot);
+                scene.add(wall);
+                // 存入碰撞体数组 (计算AABB)
+                wall.geometry.computeBoundingBox();
+                const box = new THREE.Box3();
+                box.copy(wall.geometry.boundingBox).applyMatrix4(wall.matrixWorld);
+                colliders.push(box);
+            });
+
+            // 添加内部掩体/柱子，增加随机性
+            const pillarGeo = new THREE.BoxGeometry(5, 15, 5);
+            // 复制墙壁贴图但调整比例
+            const pillarTex = createWallTexture();
+            pillarTex.repeat.set(1, 1);
+            const pillarMat = new THREE.MeshStandardMaterial({ map: pillarTex });
+            
+            for(let i=0; i<8; i++) {
+                const px = (Math.random() - 0.5) * (ARENA_SIZE - 20);
+                const pz = (Math.random() - 0.5) * (ARENA_SIZE - 20);
+                if(Math.abs(px) < 10 && Math.abs(pz) < 10) continue; // 避免生成在出生点
+
+                const pillar = new THREE.Mesh(pillarGeo, pillarMat);
+                pillar.position.set(px, 7.5, pz);
+                pillar.updateMatrixWorld();
+                scene.add(pillar);
+                
+                const pBox = new THREE.Box3();
+                pBox.copy(pillar.geometry.boundingBox).applyMatrix4(pillar.matrixWorld);
+                colliders.push(pBox);
+            }
+        }
+
+        // --- 核心逻辑 ---
+
+        // 按键状态
+        const keys = { w: false, a: false, s: false, d: false };
+        function onKeyDown(e) { if(keys.hasOwnProperty(e.key.toLowerCase())) keys[e.key.toLowerCase()] = true; }
+        function onKeyUp(e) { if(keys.hasOwnProperty(e.key.toLowerCase())) keys[e.key.toLowerCase()] = false; }
+        
+        function onMouseClick(e) {
+            if(gameState === 'PLAYING' && controls.isLocked) {
+                shoot();
+            }
+        }
+
+        function shoot() {
+            const time = performance.now() / 1000;
+            if(time - player.lastFireTime < player.fireRate) return;
+            player.lastFireTime = time;
+
+            const bulletGeo = new THREE.BoxGeometry(0.2, 0.2, 1.5);
+            const bulletMat = new THREE.MeshBasicMaterial({ color: 0x00ffff });
+            const bullet = new THREE.Mesh(bulletGeo, bulletMat);
+
+            // 从相机位置发射
+            bullet.position.copy(camera.position);
+            
+            // 获取相机朝向
+            const dir = new THREE.Vector3(0, 0, -1);
+            dir.applyQuaternion(camera.quaternion);
+            
+            // 稍微偏右下，模拟枪口位置
+            const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+            const down = new THREE.Vector3(0, -1, 0).applyQuaternion(camera.quaternion);
+            bullet.position.addScaledVector(right, 0.5).addScaledVector(down, 0.3);
+
+            // 调整子弹角度朝向准心
+            bullet.quaternion.copy(camera.quaternion);
+
+            scene.add(bullet);
+            bullets.push({
+                mesh: bullet,
+                dir: dir.normalize(),
+                life: 2.0, // 存活时间
+                pierceLeft: player.penetration,
+                hitMonsters: new Set() // 防止同一子弹重复击中同一怪物
+            });
+        }
+
+        // --- 怪物系统 (升级、生成、行动) ---
+        function spawnMonster() {
+            // 怪物强度随时间和玩家等级提升
+            const difficultyLevel = Math.floor(gameTimer / 20) + player.level; 
+            
+            // 基础属性基于难度
+            const hp = 40 + difficultyLevel * 15;
+            const speed = 4.0 + Math.min(difficultyLevel * 0.2, 6.0); // 速度上限控制
+            const damage = 10 + Math.floor(difficultyLevel * 2);
+            
+            // 视觉变化：随等级变大、变色
+            let scaleMultiplier = 1 + Math.min(difficultyLevel * 0.05, 0.8);
+            let size = 2 * scaleMultiplier;
+            
+            // 颜色演变：绿 -> 黄 -> 红 -> 紫
+            let color = 0x55ff55;
+            if(difficultyLevel > 5) color = 0xffff55;
+            if(difficultyLevel > 10) color = 0xff5555;
+            if(difficultyLevel > 15) color = 0xff00ff;
+
+            const geo = new THREE.BoxGeometry(size, size * 1.5, size);
+            const mat = new THREE.MeshStandardMaterial({ 
+                color: color, emissive: color, emissiveIntensity: 0.2,
+                roughness: 0.4
+            });
+            const mesh = new THREE.Mesh(geo, mat);
+
+            // 在场地边缘随机生成
+            let angle = Math.random() * Math.PI * 2;
+            let radius = HALF_ARENA - 5;
+            mesh.position.set(Math.cos(angle) * radius, size * 0.75, Math.sin(angle) * radius);
+            
+            scene.add(mesh);
+            monsters.push({
+                mesh: mesh,
+                hp: hp,
+                maxHp: hp,
+                speed: speed,
+                damage: damage,
+                size: size,
+                box: new THREE.Box3() // 预留物理盒子
+            });
+        }
+
+        // --- 掉落物系统 (经验、剧情) ---
+        function createDrop(x, z) {
+            const isLore = Math.random() < 0.08 && player.collectedLore.length < LORE_DATA.length; // 8% 概率掉落剧情卡
+
+            if (isLore) {
+                const geo = new THREE.BoxGeometry(1.5, 1.5, 1.5);
+                const mat = new THREE.MeshStandardMaterial({ color: 0xff00ff, emissive: 0xff00ff, emissiveIntensity: 0.8, transparent: true, opacity: 0.9 });
+                const mesh = new THREE.Mesh(geo, mat);
+                mesh.position.set(x, 1, z);
+                scene.add(mesh);
+                drops.push({ mesh, type: 'lore', floatOffset: Math.random() * Math.PI * 2 });
+            } else {
+                // 经验球
+                const expAmount = 2 + Math.floor(gameTimer / 30);
+                let size = 0.5; let color = 0x00ffff;
+                if(expAmount > 5) { size = 0.8; color = 0x5555ff; }
+                
+                const geo = new THREE.OctahedronGeometry(size);
+                const mat = new THREE.MeshStandardMaterial({ color: color, emissive: color, emissiveIntensity: 0.5 });
+                const mesh = new THREE.Mesh(geo, mat);
+                mesh.position.set(x, 0.5, z);
+                scene.add(mesh);
+                drops.push({ mesh, type: 'exp', value: expAmount, floatOffset: Math.random() * Math.PI * 2 });
+            }
+        }
+
+        function triggerLore() {
+            if(player.collectedLore.length >= LORE_DATA.length) return;
+            const loreIndex = player.collectedLore.length;
+            player.collectedLore.push(loreIndex);
+            
+            uiElements.loreText.innerText = LORE_DATA[loreIndex];
+            uiElements.loreCount.innerText = player.collectedLore.length;
+            
+            // 切换到剧情阅读状态
+            gameState = 'LORE';
+            document.exitPointerLock(); // 解锁鼠标
+            uiElements.hud.style.display = 'none';
+            uiElements.crosshair.style.display = 'none';
+            uiElements.lore.style.display = 'flex';
+        }
+
+        // --- 碰撞处理核心机制 ---
+        // 专门处理玩家或怪物的独立轴向滑动碰撞，防止卡墙
+        function applyMovementWithCollision(object, moveVec, boundingRadius, height) {
+            const tempBox = new THREE.Box3();
+            
+            // 尝试移动X
+            let oldX = object.position.x;
+            object.position.x += moveVec.x;
+            tempBox.setFromCenterAndSize(
+                new THREE.Vector3(object.position.x, object.position.y, object.position.z),
+                new THREE.Vector3(boundingRadius * 2, height, boundingRadius * 2)
+            );
+            
+            for(let c of colliders) {
+                if(tempBox.intersectsBox(c)) {
+                    object.position.x = oldX; // 发生碰撞，撤销X轴移动
+                    break;
+                }
+            }
+
+            // 尝试移动Z
+            let oldZ = object.position.z;
+            object.position.z += moveVec.z;
+            tempBox.setFromCenterAndSize(
+                new THREE.Vector3(object.position.x, object.position.y, object.position.z),
+                new THREE.Vector3(boundingRadius * 2, height, boundingRadius * 2)
+            );
+
+            for(let c of colliders) {
+                if(tempBox.intersectsBox(c)) {
+                    object.position.z = oldZ; // 发生碰撞，撤销Z轴移动
+                    break;
+                }
+            }
+            
+            // 兜底：防止越过主场一边界
+            object.position.x = THREE.MathUtils.clamp(object.position.x, -HALF_ARENA + boundingRadius, HALF_ARENA - boundingRadius);
+            object.position.z = THREE.MathUtils.clamp(object.position.z, -HALF_ARENA + boundingRadius, HALF_ARENA - boundingRadius);
+        }
+
+        // --- 主更新循环 ---
+        let lastSpawnTime = 0;
+        
+        function update(delta) {
+            if(gameState !== 'PLAYING') return;
+
+            gameTimer += delta;
+            
+            // 更新 UI 时钟
+            const mins = Math.floor(gameTimer / 60).toString().padStart(2, '0');
+            const secs = Math.floor(gameTimer % 60).toString().padStart(2, '0');
+            uiElements.time.innerText = `${mins}:${secs}`;
+
+            // --- 1. 玩家移动与卡墙修复 ---
+            const dir = new THREE.Vector3();
+            const right = new THREE.Vector3();
+            // 获取水平朝向 (去除Y轴影响)
+            camera.getWorldDirection(dir);
+            dir.y = 0; dir.normalize();
+            right.crossVectors(dir, new THREE.Vector3(0,1,0)).normalize();
+
+            const moveVec = new THREE.Vector3(0,0,0);
+            if(keys.w) moveVec.add(dir);
+            if(keys.s) moveVec.sub(dir);
+            if(keys.a) moveVec.sub(right);
+            if(keys.d) moveVec.add(right);
+            
+            if(moveVec.lengthSq() > 0) moveVec.normalize().multiplyScalar(player.speed * delta);
+            
+            // 相对于相机获取实际坐标对象
+            const playerObj = controls.getObject();
+            // 应用改进的独立轴碰撞
+            applyMovementWithCollision(playerObj, moveVec, 1.0, 3.2);
+
+            // 更新点光源位置
+            scene.children.forEach(c => {
+                if(c.type === 'PointLight') {
+                    c.position.copy(playerObj.position);
+                    c.position.y += 2;
+                }
+            });
+
+            // --- 2. 怪物生成 ---
+            const spawnInterval = Math.max(0.5, 2.5 - (gameTimer / 60) * 0.5); // 随时间加快刷新
+            if(gameTimer - lastSpawnTime > spawnInterval && monsters.length < 50) {
+                spawnMonster();
+                lastSpawnTime = gameTimer;
+            }
+
+            // --- 3. 怪物逻辑 (寻路、移动、碰撞修复) ---
+            const playerPos = playerObj.position.clone();
+            playerPos.y = 0;
+
+            for (let i = monsters.length - 1; i >= 0; i--) {
+                let m = monsters[i];
+                let mPos = m.mesh.position.clone();
+                mPos.y = 0;
+
+                // 指向玩家
+                let toPlayer = new THREE.Vector3().subVectors(playerPos, mPos);
+                let distToPlayer = toPlayer.length();
+
+                // 受到伤害闪烁恢复
+                if(m.mesh.material.emissive.getHex() === 0xffffff) {
+                    m.mesh.material.emissive.setHex(m.mesh.material.color.getHex());
+                }
+
+                if(distToPlayer < 1.5) {
+                    // 攻击玩家
+                    player.hp -= m.damage * delta;
+                    updateHUD();
+                    if(player.hp <= 0) triggerGameOver();
+                } else {
+                    // 移动
+                    toPlayer.normalize().multiplyScalar(m.speed * delta);
+                    
+                    // 怪物之间的简单推挤 (避免重叠卡死)
+                    for(let j=0; j<monsters.length; j++) {
+                        if(i !== j) {
+                            let other = monsters[j];
+                            let diff = new THREE.Vector3().subVectors(m.mesh.position, other.mesh.position);
+                            diff.y = 0;
+                            let dist = diff.length();
+                            let minDist = (m.size + other.size) * 0.6;
+                            if(dist < minDist && dist > 0) {
+                                toPlayer.add(diff.normalize().multiplyScalar((minDist - dist) * delta * 2));
+                            }
+                        }
+                    }
+
+                    // 怪物也应用独立轴滑动碰撞，解决卡墙
+                    applyMovementWithCollision(m.mesh, toPlayer, m.size/2, m.size*1.5);
+                }
+                
+                // 强制面向玩家
+                m.mesh.lookAt(playerObj.position.x, m.mesh.position.y, playerObj.position.z);
+                
+                // 更新AABB盒子用于子弹检测
+                m.box.setFromObject(m.mesh);
+            }
+
+            // --- 4. 子弹逻辑 ---
+            for (let i = bullets.length - 1; i >= 0; i--) {
+                let b = bullets[i];
+                b.life -= delta;
+                if(b.life <= 0) {
+                    scene.remove(b.mesh);
+                    bullets.splice(i, 1);
+                    continue;
+                }
+
+                b.mesh.position.addScaledVector(b.dir, player.bulletSpeed * delta);
+                
+                let bBox = new THREE.Box3().setFromObject(b.mesh);
+                let hitWall = false;
+                
+                // 撞墙检测
+                for(let c of colliders) {
+                    if(bBox.intersectsBox(c)) {
+                        hitWall = true;
+                        break;
+                    }
+                }
+
+                if(hitWall) {
+                    scene.remove(b.mesh);
+                    bullets.splice(i, 1);
+                    continue;
+                }
+
+                // 击中怪物检测
+                let hitCount = 0;
+                for (let j = monsters.length - 1; j >= 0; j--) {
+                    let m = monsters[j];
+                    if(!b.hitMonsters.has(m) && bBox.intersectsBox(m.box)) {
+                        // 命中
+                        b.hitMonsters.add(m);
+                        m.hp -= player.damage;
+                        m.mesh.material.emissive.setHex(0xffffff); // 闪白
+                        hitCount++;
+                        
+                        // 击杀
+                        if(m.hp <= 0) {
+                            createDrop(m.mesh.position.x, m.mesh.position.z);
+                            scene.remove(m.mesh);
+                            monsters.splice(j, 1);
+                        }
+
+                        if(b.hitMonsters.size >= b.pierceLeft) {
+                            scene.remove(b.mesh);
+                            bullets.splice(i, 1);
+                            break; // 子弹穿透耗尽
+                        }
+                    }
+                }
+            }
+
+            // --- 5. 掉落物拾取逻辑 ---
+            for (let i = drops.length - 1; i >= 0; i--) {
+                let d = drops[i];
+                // 旋转悬浮动画
+                d.mesh.rotation.y += delta * 2;
+                d.mesh.rotation.x += delta;
+                d.mesh.position.y = 1 + Math.sin(gameTimer * 3 + d.floatOffset) * 0.3;
+
+                let dist = d.mesh.position.distanceTo(playerObj.position);
+                
+                // 吸附范围
+                if(dist < 8) {
+                    let toPlayer = new THREE.Vector3().subVectors(playerObj.position, d.mesh.position);
+                    d.mesh.position.add(toPlayer.normalize().multiplyScalar(15 * delta));
+                }
+
+                // 拾取
+                if(dist < 2.5) {
+                    if(d.type === 'lore') {
+                        triggerLore();
+                    } else if(d.type === 'exp') {
+                        player.exp += d.value;
+                        if(player.exp >= player.expNeeded) {
+                            levelUp();
+                        }
+                        updateHUD();
+                    }
+                    scene.remove(d.mesh);
+                    drops.splice(i, 1);
+                }
+            }
+        }
+
+        // --- 升级与 UI ---
+        function updateHUD() {
+            uiElements.hpText.innerText = Math.ceil(player.hp);
+            uiElements.maxHpText.innerText = player.maxHp;
+            uiElements.hpBar.style.width = `${Math.max(0, (player.hp / player.maxHp) * 100)}%`;
+            
+            uiElements.level.innerText = player.level;
+            uiElements.expNeedText.innerText = player.expNeeded;
+            uiElements.expBar.style.width = `${Math.min(100, (player.exp / player.expNeeded) * 100)}%`;
+            
+            uiElements.weaponDmg.innerText = player.damage;
+            let frText = player.fireRate < 0.15 ? '极快' : (player.fireRate < 0.25 ? '快速' : '标准');
+            uiElements.weaponFr.innerText = frText;
+        }
+
+        const upgrades = [
+            { id: 'hp', name: "纳米纤维注血", desc: "最大生命值 +25，完全恢复", apply: () => { player.maxHp += 25; player.hp = player.maxHp; } },
+            { id: 'dmg', name: "等离子线圈压缩", desc: "武器伤害 +15", apply: () => { player.damage += 15; } },
+            { id: 'spd', name: "动力外骨骼优化", desc: "移动速度 +15%", apply: () => { player.speed *= 1.15; } },
+            { id: 'fr', name: "加速冷却组件", desc: "射速提升 20%", apply: () => { player.fireRate *= 0.8; } },
+            { id: 'pierce', name: "高能穿甲弹", desc: "子弹穿透目标数 +1", apply: () => { player.penetration += 1; } }
+        ];
+
+        function levelUp() {
+            player.level++;
+            player.exp -= player.expNeeded;
+            player.expNeeded = Math.floor(player.expNeeded * 1.5);
+            
+            gameState = 'UPGRADE';
+            document.exitPointerLock();
+            uiElements.hud.style.display = 'none';
+            uiElements.crosshair.style.display = 'none';
+            uiElements.upgrade.style.display = 'flex';
+
+            // 随机抽取3个升级
+            let shuffled = [...upgrades].sort(() => 0.5 - Math.random());
+            let choices = shuffled.slice(0, 3);
+            
+            const container = document.getElementById('upgrade-cards');
+            container.innerHTML = '';
+            
+            choices.forEach(c => {
+                const card = document.createElement('div');
+                card.className = "glass-panel p-6 rounded-lg cursor-pointer hover:bg-gray-800 transition transform hover:scale-105 border-b-4 border-cyan-500";
+                card.innerHTML = `
+                    <h3 class="text-2xl font-bold text-cyan-300 mb-2">${c.name}</h3>
+                    <p class="text-gray-300">${c.desc}</p>
+                `;
+                card.onclick = () => {
+                    c.apply();
+                    updateHUD();
+                    uiElements.upgrade.style.display = 'none';
+                    controls.lock(); // 会触发事件恢复 PLAYING
+                };
+                container.appendChild(card);
+            });
+        }
+
+        function triggerGameOver() {
+            gameState = 'GAMEOVER';
+            document.exitPointerLock();
+            uiElements.hud.style.display = 'none';
+            uiElements.crosshair.style.display = 'none';
+            uiElements.gameOver.style.display = 'flex';
+            
+            document.getElementById('end-time').innerText = uiElements.time.innerText;
+            document.getElementById('end-lore').innerText = `${player.collectedLore.length} / ${LORE_DATA.length}`;
+        }
+
+        function restartGame() {
+            // 重置玩家
+            player.hp = 100; player.maxHp = 100;
+            player.level = 1; player.exp = 0; player.expNeeded = 10;
+            player.speed = 15; player.fireRate = 0.3; player.damage = 25; player.penetration = 1;
+            player.collectedLore = [];
+            
+            gameTimer = 0;
+            lastSpawnTime = 0;
+            updateHUD();
+            uiElements.loreCount.innerText = "0";
+            
+            // 清理场景实体
+            monsters.forEach(m => scene.remove(m.mesh));
+            bullets.forEach(b => scene.remove(b.mesh));
+            drops.forEach(d => scene.remove(d.mesh));
+            monsters.length = 0; bullets.length = 0; drops.length = 0;
+
+            // 重置位置
+            controls.getObject().position.set(0, 2, 0);
+            
+            uiElements.gameOver.style.display = 'none';
+            uiElements.menu.style.display = 'none';
+            controls.lock();
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            animationFrameId = requestAnimationFrame(animate);
+            const time = performance.now();
+            const delta = Math.min((time - lastTime) / 1000, 0.1); // 限制最大delta防止卡顿穿模
+            lastTime = time;
+
+            update(delta);
+            renderer.render(scene, camera);
+        }
+
+        // 启动初始化
+        window.onload = init;
+
+    </script>
+</body>
+</html>
